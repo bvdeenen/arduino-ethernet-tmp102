@@ -1,171 +1,225 @@
-// HIH_6130_1  - Arduino
-// 
-// Arduino                HIH-6130
-// SCL (Analog 5) ------- SCL (term 3)
-// SDA (Analog 4) ------- SDA (term 4)
-//
-// Note 2.2K pullups to 5 VDC on both SDA and SCL
-//
-// Pin4 ----------------- Vdd (term 8) 
-//
-// Illustrates how to measure relative humidity and temperature.
-//
-// copyright, Peter H Anderson, Baltimore, MD, Nov, '11
-// You may use it, but please give credit.  
-#include <Ethernet.h>
-#include <Exosite.h> 
-#include <Wire.h> //I2C library
-#include <EEPROM.h>
+// vim:ts=4:tw=80:expandtab:syntax=c
+
 #include <SPI.h>
+#include <Ethernet.h>
+#include <Exosite.h>
 
-String cikData = "bc89fb9db977b3e017dd7b675ffc362aa2f138d1";  // <-- FILL IN YOUR CIK HERE! (https://portals.exosite.com -> Add Device)
-//byte macData[] = { 0x90, 0xA2, 0xDA, 0x00, 0xF4, 0xAA };
-byte macData[] = { 
-  0x90, 0xA2, 0xDA, 0x0D, 0x35, 0x3C };
+#define TMP	0x49
+#define TMP_W (TMP << 1)
+#define TMP_R (TMP_W | 1)
+#define TEMP_REG 0
 
-// User defined variables for Exosite reporting period and averaging samples
-#define REPORT_TIMEOUT 30000 //milliseconds period for reporting to Exosite.com
-#define SENSOR_READ_TIMEOUT 1000 //milliseconds period for reading sensors in loop
+#define REPORT_TIMEOUT 2000     //milliseconds period for reporting to Exosite.com
+// Pin 9 has a led on the 'ethernet' board
+int led = 9;
+unsigned long sendPrevTime;
+char line[40];
+int v16;
+char celsius[] = "             ";
 
-byte fetch_humidity_temperature(unsigned int *p_Humidity, unsigned int *p_Temperature);
-void print_float(float f, int num_digits);
+unsigned char I2C_Read(unsigned char ack);
+void I2C_WriteBit(unsigned char c);
+unsigned char I2C_ReadBit();
+void I2C_Init();
+void I2C_Start();
+void I2C_Stop();
+unsigned char I2C_Write(unsigned char c);
+unsigned char I2C_Read(unsigned char ack);
 
-#define TRUE 1
-#define FALSE 0
-
-class EthernetClient client;
-Exosite exosite(cikData, &client);
-char writeParam[80]="";
-
-
-void setup(void)
+// the setup routine runs once when you press reset:
+void setup()
 {
-  Serial.begin(9600);
-  Wire.begin();
-  Ethernet.begin(macData);
+    // initialize the digital pin as an output.
+    pinMode(led, OUTPUT);
+    I2C_Init();
+    Serial.begin(9600);
+    Serial.println("Boot");
+    delay(1000);
 
-  delay(1000);
-  Serial.println(">>>>>>>>>>>>>>>>>>>>>>>>");  // just to be sure things are working
+    I2C_Start();
+    I2C_Write(TMP_W);
+    I2C_ReadBit();
+    I2C_Write(TEMP_REG);
+    I2C_ReadBit();
+    I2C_Stop();
+
+    sprintf(line, "R: 0x%x W: 0x%x", TMP_R, TMP_W);
+
+    Serial.println(line);
+    sendPrevTime = millis();
+    delay(100);
 }
 
-void loop(void)
+void read_tmp102()
 {
-  byte _status;
-  unsigned int H_dat, T_dat;
-  float RH, T_C;
-  static unsigned long sendPrevTime = 0;
-  String readParam = "";
-  String returnString = "";  
+    unsigned char l, h;
 
-  char Ts[20], Rhs[20];
+    I2C_Start();
+    I2C_Write(TMP_R);
+    I2C_ReadBit();
+    h = I2C_Read(1);
+    delay(10);
+    l = I2C_Read(0);
 
+    sprintf(line, "%x %x", l, h);
+    Serial.println(line);
 
-  while(1)
-  {
-    _status = fetch_humidity_temperature(&H_dat, &T_dat);
+    v16 = h << 4 | ((l >> 4) & 0xf);
 
-    switch(_status)
-    {
-    case 0:  
-      Serial.println("Normal.");
-      break;
-    case 1:  
-      Serial.println("Stale Data.");
-      break;
-    case 2:  
-      Serial.println("In command mode.");
-      break;
-    default: 
-      Serial.println("Diagnostic."); 
-      break; 
-    }       
+    sprintf(line, "%x %d  ; float = ", v16, v16);
+    Serial.print(line);
+    dtostrf(v16 * 0.0625, 0, 2, celsius);
+    Serial.println(celsius);
+    I2C_Stop();
+}
 
-    RH = (float) H_dat * 6.10e-3;
-    T_C = (float) T_dat * 1.007e-2 - 40.0;
+// the loop routine runs over and over again forever:
+void loop()
+{
+    digitalWrite(led, HIGH);    // turn the LED on (HIGH is the voltage level) 
+    delay(200);                 // wait for a second
+    digitalWrite(led, LOW);     // turn the LED off by making the voltage LOW 
+    delay(50);                  // wait for a second
 
-    print_float(RH, 1);
-    Serial.print("  ");
-    print_float(T_C, 2);
-    Serial.println();
-    delay(1000);
+    read_tmp102();
     // Send to Exosite every defined timeout period
     if (millis() - sendPrevTime > REPORT_TIMEOUT) {
-      dtostrf(RH, 0,2, Rhs);
-      dtostrf(T_C, 0,2, Ts);
-      sprintf(writeParam, "T2=%s&rh2=%s&T=%d&rh=%d", Ts, Rhs, T_dat, H_dat);
-      //writeParam += "&message=hello"; //add another piece of data to send
+        Serial.println("transmitting");
+        sendPrevTime = millis();        //reset report period timer
+    }
+    delay(500);
+    Serial.print(".");
+}
 
+// Port for the I2C
+#define I2C_DDR DDRD
+#define I2C_PIN PIND
+#define I2C_PORT PORTD
 
-      Serial.println(writeParam);
-      if ( exosite.writeRead(writeParam, readParam, returnString)) {
-        if (returnString != "") {
-          Serial.println(returnString);
-        }
-      }
-      else {
-        Serial.println("Exosite Error");
-      }
-      Serial.print("*");
-      sendPrevTime = millis(); //reset report period timer
+// Pins to be used in the bit banging
+#define I2C_CLK 7
+#define I2C_DAT 6
 
+#define I2C_DATA_HI()\
+    I2C_DDR &= ~ (1 << I2C_DAT); I2C_PORT |= (1 << I2C_DAT);
+#define I2C_DATA_LO()\
+    I2C_DDR |= (1 << I2C_DAT); I2C_PORT &= ~ (1 << I2C_DAT);
 
+#define I2C_CLOCK_HI()\
+    I2C_DDR &= ~ (1 << I2C_CLK); I2C_PORT |= (1 << I2C_CLK);
+#define I2C_CLOCK_LO()\
+    I2C_DDR |= (1 << I2C_CLK); I2C_PORT &= ~ (1 << I2C_CLK);
+
+void I2C_WriteBit(unsigned char c)
+{
+    if (c > 0) {
+        I2C_DATA_HI();
+    } else {
+        I2C_DATA_LO();
     }
 
-  }
+    I2C_CLOCK_HI();
+    while ((I2C_PIN & (1 << I2C_CLK)) == 0) {
+    }
+    delay(1);
+
+    I2C_CLOCK_LO();
+    delay(1);
+
+    if (c > 0) {
+        I2C_DATA_LO();
+    }
+
+    delay(1);
 }
 
-byte fetch_humidity_temperature(unsigned int *p_H_dat, unsigned int *p_T_dat)
+unsigned char I2C_ReadBit()
 {
-  byte address, Hum_H, Hum_L, Temp_H, Temp_L, _status;
-  unsigned int H_dat, T_dat;
-  address = 0x27;
-  ;
-  Wire.beginTransmission(address); 
-  Wire.endTransmission();
-  delay(100);
+    I2C_DATA_HI();
 
-  Wire.requestFrom((int)address, (int) 4);
-  Hum_H = Wire.read();
-  Hum_L = Wire.read();
-  Temp_H = Wire.read();
-  Temp_L = Wire.read();
-  Wire.endTransmission();
+    I2C_CLOCK_HI();
+    while ((I2C_PIN & (1 << I2C_CLK)) == 0) {
+    }
+    delay(1);
 
-  _status = (Hum_H >> 6) & 0x03;
-  Hum_H = Hum_H & 0x3f;
-  H_dat = (((unsigned int)Hum_H) << 8) | Hum_L;
-  T_dat = (((unsigned int)Temp_H) << 8) | Temp_L;
-  T_dat = T_dat / 4;
-  *p_H_dat = H_dat;
-  *p_T_dat = T_dat;
-  return(_status);
+    unsigned char c = I2C_PIN;
+
+    I2C_CLOCK_LO();
+    delay(1);
+
+    return (c >> I2C_DAT) & 1;
 }
 
-void print_float(float f, int num_digits)
+// Inits bitbanging port, must be called before using the functions below
+//
+void I2C_Init()
 {
-  int f_int;
-  int pows_of_ten[4] = {
-    1, 10, 100, 1000  };
-  int multiplier, whole, fract, d, n;
+    I2C_PORT &= ~((1 << I2C_DAT) | (1 << I2C_CLK));
 
-  multiplier = pows_of_ten[num_digits];
-  if (f < 0.0)
-  {
-    f = -f;
-    Serial.print("-");
-  }
-  whole = (int) f;
-  fract = (int) (multiplier * (f - (float)whole));
+    I2C_CLOCK_HI();
+    I2C_DATA_HI();
 
-  Serial.print(whole);
-  Serial.print(".");
+    delay(1);
+}
 
-  for (n=num_digits-1; n>=0; n--) // print each digit with no leading zero suppression
-  {
-    d = fract / pows_of_ten[n];
-    Serial.print(d);
-    fract = fract % pows_of_ten[n];
-  }
-}      
+// Send a START Condition
+//
+void I2C_Start()
+{
+    // set both to high at the same time
+    I2C_DDR &= ~((1 << I2C_DAT) | (1 << I2C_CLK));
+    delay(1);
 
+    I2C_DATA_LO();
+    delay(1);
 
+    I2C_CLOCK_LO();
+    delay(1);
+}
+
+// Send a STOP Condition
+//
+void I2C_Stop()
+{
+    I2C_CLOCK_HI();
+    delay(1);
+
+    I2C_DATA_HI();
+    delay(1);
+}
+
+// write a byte to the I2C slave device
+//
+unsigned char I2C_Write(unsigned char c)
+{
+    for (char i = 0; i < 8; i++) {
+        I2C_WriteBit(c & 128);
+
+        c <<= 1;
+    }
+
+    //return I2C_ReadBit();
+    return 0;
+}
+
+// read a byte from the I2C slave device
+//
+unsigned char I2C_Read(unsigned char ack)
+{
+    unsigned char res = 0;
+
+    for (char i = 0; i < 8; i++) {
+        res <<= 1;
+        res |= I2C_ReadBit();
+    }
+
+    if (ack > 0) {
+        I2C_WriteBit(0);
+    } else {
+        I2C_WriteBit(1);
+    }
+
+    delay(1);
+
+    return res;
+}
