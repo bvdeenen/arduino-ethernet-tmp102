@@ -1,21 +1,40 @@
 // vim:ts=4:tw=80:expandtab:syntax=c
 
-#include <SPI.h>
 #include <Ethernet.h>
 #include <Exosite.h>
+#include <EEPROM.h>
+#include <SPI.h>
 
+// for bitbang i2c tmp102 reading
 #define TMP	0x49
 #define TMP_W (TMP << 1)
 #define TMP_R (TMP_W | 1)
 #define TEMP_REG 0
 
-#define REPORT_TIMEOUT 2000     //milliseconds period for reporting to Exosite.com
+/* 
+In my makefile I have this
+CPPFLAGS+=-DCIK2=\"${CIK2}\"
+
+and in my ~/.bashrc I have 
+export CIK2=674e....4367
+*/
+
+char cikData[] = CIK2;          // <-- FILL IN YOUR CIK HERE! (https://portals.exosite.com -> Add Device)
+byte macData[] = { 0x90, 0xA2, 0xDA, 0x00, 0xF4, 0xAA };
+
+#define REPORT_TIMEOUT 60000    //milliseconds period for reporting to Exosite.com
 // Pin 9 has a led on the 'ethernet' board
 int led = 9;
 unsigned long sendPrevTime;
 char line[40];
 int v16;
-char celsius[] = "             ";
+char celsius[40] = "97.6";
+char writeParam[80] = "";
+char readParam[50] = "";
+char *r = (char *)malloc(1);
+
+class EthernetClient client;
+Exosite exosite(cikData, &client);
 
 unsigned char I2C_Read(unsigned char ack);
 void I2C_WriteBit(unsigned char c);
@@ -29,12 +48,13 @@ unsigned char I2C_Read(unsigned char ack);
 // the setup routine runs once when you press reset:
 void setup()
 {
-    // initialize the digital pin as an output.
     pinMode(led, OUTPUT);
     I2C_Init();
+    Ethernet.begin(macData);
     Serial.begin(9600);
     Serial.println("Boot");
     delay(1000);
+    Serial.println(Ethernet.localIP());
 
     I2C_Start();
     I2C_Write(TMP_W);
@@ -42,8 +62,6 @@ void setup()
     I2C_Write(TEMP_REG);
     I2C_ReadBit();
     I2C_Stop();
-
-    sprintf(line, "R: 0x%x W: 0x%x", TMP_R, TMP_W);
 
     Serial.println(line);
     sendPrevTime = millis();
@@ -60,16 +78,10 @@ void read_tmp102()
     h = I2C_Read(1);
     delay(10);
     l = I2C_Read(0);
-
-    sprintf(line, "%x %x", l, h);
-    Serial.println(line);
-
     v16 = h << 4 | ((l >> 4) & 0xf);
-
-    sprintf(line, "%x %d  ; float = ", v16, v16);
-    Serial.print(line);
     dtostrf(v16 * 0.0625, 0, 2, celsius);
-    Serial.println(celsius);
+    Serial.print(celsius);
+    Serial.print(", ");
     I2C_Stop();
 }
 
@@ -80,15 +92,27 @@ void loop()
     delay(200);                 // wait for a second
     digitalWrite(led, LOW);     // turn the LED off by making the voltage LOW 
     delay(50);                  // wait for a second
+    r[0] = 0;
 
     read_tmp102();
     // Send to Exosite every defined timeout period
     if (millis() - sendPrevTime > REPORT_TIMEOUT) {
-        Serial.println("transmitting");
+        Serial.println("Sending to exosite");
+        sprintf(writeParam, "T=%s", celsius);
+        Serial.print("'");
+        Serial.print(writeParam);
+        Serial.println("'");
+        if (exosite.writeRead(writeParam, readParam, &r)) {
+            Serial.println("Return");
+            if (r[0] != 0) {
+                Serial.println(r);
+            }
+        } else {
+            Serial.println("Exosite Error");
+        }
         sendPrevTime = millis();        //reset report period timer
     }
     delay(500);
-    Serial.print(".");
 }
 
 // Port for the I2C

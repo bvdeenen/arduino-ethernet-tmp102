@@ -2,3 +2,4 @@ temp_humidity.hex
 .lib/
 tags
 *~
+.dep/
