@@ -1,5 +1,3 @@
-
-arduino-mega-T-rh
 arduino-ethernet-tmp102
 ========================
 
